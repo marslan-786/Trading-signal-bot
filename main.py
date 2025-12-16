@@ -2,7 +2,7 @@ import asyncio
 import time
 import json
 import random
-import math  # ٹرینڈ کو اسٹیبل کرنے کے لیے
+import math
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, ConversationHandler
@@ -40,7 +40,7 @@ AA_ID, AA_PASS, AA_DAYS, AA_PERM = 6, 7, 8, 9
 CL_INPUT = 10
 
 # ==========================================
-# 🧠 STABLE TRADE BRAIN
+# 🧠 STABLE TRADE BRAIN (200 Candles Based)
 # ==========================================
 async def get_logic_settings():
     settings = await settings_collection.find_one({"type": "logic"})
@@ -50,13 +50,15 @@ async def get_logic_settings():
     return settings
 
 def calculate_signal(prices, config):
-    # 1. اگر ڈیٹا کم ہے تو کچھ نہ کہیں
-    if len(prices) < config['ema_long']: return "WAIT ⏳"
+    # ہمیں فیصلہ لینے کے لیے پوری 200 کینڈلز کا ڈیٹا چاہیے
+    if len(prices) < config['ema_long']: return "WAIT ⏳ (Gathering Data)"
 
-    # 2. انڈیکیٹرز کا حساب
+    # --- 1. EMA CALCULATION (Trend) ---
+    # یہ پچھلی 200 کینڈلز کا نچوڑ ہے، یہ آسانی سے نہیں بدلے گا
     ema_short = sum(prices[-config['ema_short']:]) / config['ema_short']
     ema_long = sum(prices[-config['ema_long']:]) / config['ema_long']
     
+    # --- 2. RSI CALCULATION (Momentum) ---
     gains, losses = [], []
     for i in range(-config['rsi_period'], 0):
         change = prices[i] - prices[i-1]
@@ -66,27 +68,24 @@ def calculate_signal(prices, config):
     avg_loss = sum(losses) / len(losses) if losses else 0
     rsi = 100 - (100 / (1 + avg_gain / avg_loss)) if avg_loss != 0 else 50
     
+    # --- 3. MACD CALCULATION (Strength) ---
     short_ema = sum(prices[-config['macd_fast']:]) / config['macd_fast']
     long_ema = sum(prices[-config['macd_slow']:]) / config['macd_slow']
     macd = short_ema - long_ema
 
-    # 3. اسٹیبل فیصلہ (Trend Bias)
-    # ہم صرف تب فیصلہ بدلیں گے جب ٹرینڈ واضح ہو۔
-    # چھوٹے RSI کے جھٹکوں کو نظر انداز کریں گے۔
-    
-    signal = "HOLD 😐" # ڈیفالٹ
+    # --- 4. DECISION LOGIC (STABLE) ---
+    # ڈیفالٹ فیصلہ HOLD ہے
+    signal = "HOLD 😐"
 
-    # STRONG UPTREND (CALL)
-    # اگر 50 EMA اوپر ہے اور 200 EMA نیچے ہے (واضح ٹرینڈ)
+    # CALL صرف تب جب ٹرینڈ واضح طور پر اوپر ہو (EMA 50 > EMA 200)
     if ema_short > ema_long:
-        # RSI چیک کریں (کیا یہ سیف زون میں ہے؟)
+        # کیا RSI مناسب ہے؟ (نہ بہت مہنگا، نہ سستا)
         if config['call_rsi_min'] < rsi < config['call_rsi_max']:
-             if macd > 0:
+             if macd > 0: # اور مومینٹم بھی ساتھ دے رہا ہو
                  signal = "CALL 🟢"
     
-    # STRONG DOWNTREND (PUT)
+    # PUT صرف تب جب ٹرینڈ واضح طور پر نیچے ہو (EMA 50 < EMA 200)
     elif ema_short < ema_long:
-        # RSI چیک کریں
         if config['put_rsi_min'] < rsi < config['put_rsi_max']:
             if macd < 0:
                 signal = "PUT 🔴"
@@ -96,11 +95,9 @@ def calculate_signal(prices, config):
 def get_progress_bar():
     now = datetime.now()
     seconds = now.second
-    # خوبصورت بار
+    # 60s Cycle
     total_blocks = 12
     filled_blocks = int((seconds / 60) * total_blocks)
-    
-    # ⬛️ = Empty, 🟩 = Filled
     bar = "🟩" * filled_blocks + "▫️" * (total_blocks - filled_blocks)
     return bar, 60 - seconds
 
@@ -123,7 +120,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔒 **System Locked**\nEnter Login ID:", parse_mode="Markdown")
         return LOGIN_USER
     except:
-        await update.message.reply_text("⚠️ Restarting... Try /start again.")
+        await update.message.reply_text("⚠️ Bot is waking up... Retry /start")
 
 async def login_user_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['temp_login'] = update.message.text
@@ -181,7 +178,7 @@ async def pair_select_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     except: await query.message.edit_text(text=f"📉 Pair: **{context.user_data['pair']}**\nSelect timeframe:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 # ==========================================
-# ⚡️ FINAL CARD STYLE SIGNAL
+# ⚡️ FINAL CARD STYLE SIGNAL (STABLE)
 # ==========================================
 async def generate_signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -191,36 +188,40 @@ async def generate_signal_handler(update: Update, context: ContextTypes.DEFAULT_
     timeframe = query.data.split("_")[1]
     stop_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP", callback_data="stop_live")]])
     
-    try: msg = await query.message.edit_caption(caption="🔄 **Loading Strategy...**", parse_mode="Markdown")
-    except: msg = await query.message.edit_text(text="🔄 **Loading Strategy...**", parse_mode="Markdown")
+    try: msg = await query.message.edit_caption(caption="🔄 **Gathering 200 Candles History...**", parse_mode="Markdown")
+    except: msg = await query.message.edit_text(text="🔄 **Gathering 200 Candles History...**", parse_mode="Markdown")
 
     context.user_data['is_live'] = True
     
-    # ٹرینڈ ویو کے لیے ایک مصنوعی "Sine Wave" تاکہ ٹیسٹ میں سگنل بار بار نہ بدلے
-    # اصلی API میں یہ کوڈ ہٹا دیا جائے گا کیونکہ وہاں اصلی قیمت ہوگی
-    counter = 0 
+    # --- 1. GENERATE STABLE HISTORY (پچھلا ڈیٹا) ---
+    # ہم لوپ سے باہر 199 کینڈلز فکس کر رہے ہیں
+    # یہ ہمارا "ماضی" ہے جو بدلے گا نہیں
+    trend_type = random.choice(["UP", "DOWN", "FLAT"])
+    base_price = 1.0500
+    history_prices = []
+    
+    for i in range(199):
+        if trend_type == "UP": base_price += 0.0001
+        elif trend_type == "DOWN": base_price -= 0.0001
+        history_prices.append(base_price + random.uniform(-0.0002, 0.0002))
 
+    # --- 2. LIVE LOOP ---
     while context.user_data.get('is_live', False):
         try:
-            # --- STABLE MOCK DATA ---
-            # یہ کوڈ قیمت کو ایک سمت میں لے کر جائے گا تاکہ ٹرینڈ بنے
-            counter += 1
-            trend_direction = math.sin(counter / 10) # Smooth wave
-            base_price = 1.0500 + (trend_direction * 0.0020)
+            # صرف آخری (Current) کینڈل بدلے گی
+            live_fluctuation = random.uniform(-0.0005, 0.0005)
+            current_live_price = history_prices[-1] + live_fluctuation
             
-            # 200 کینڈلز جنریٹ کریں (Trend Based)
-            prices = [base_price + random.uniform(-0.0005, 0.0005) for _ in range(250)]
+            # 200 کینڈلز کا مکمل سیٹ (199 پرانی + 1 نئی)
+            # EMA 200 کا حساب ان سب پر ہوگا
+            full_data = history_prices + [current_live_price]
             
             # --- LOGIC ---
             config = await get_logic_settings()
-            signal = calculate_signal(prices, config)
+            signal = calculate_signal(full_data, config)
             
             # --- PROGRESS BAR ---
             bar, seconds_left = get_progress_bar()
-            
-            # --- CARD DESIGN (Quote Block) ---
-            # سائیڈ لائن کے لیے '>' کا استعمال
-            # AI Analysis کو ہٹا دیا گیا ہے
             
             res_text = (
                 f"📊 **MARKET ANALYSIS**\n"
@@ -238,11 +239,15 @@ async def generate_signal_handler(update: Update, context: ContextTypes.DEFAULT_
             )
             
             await msg.edit_caption(caption=res_text, reply_markup=stop_keyboard, parse_mode="Markdown")
-            await asyncio.sleep(3) # 3 سیکنڈ کا وقفہ
+            await asyncio.sleep(3)
             
+            # اگر منٹ پورا ہو جائے تو ہسٹری میں یہ کینڈل پکی کر دیں
+            if seconds_left <= 3:
+                history_prices.append(current_live_price)
+                if len(history_prices) > 200: history_prices.pop(0)
+
         except BadRequest:
             await asyncio.sleep(3)
-            continue
         except Exception as e:
             break
 
@@ -253,13 +258,9 @@ async def stop_live_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await get_pairs_handler(update, context)
 
 # ==========================================
-# 👑 OWNER & ADMIN (Simplified)
+# 👑 OWNER & ADMIN (Short)
 # ==========================================
-# (میں نے پچھلے کوڈ کے کنورسیشن ہینڈلرز شامل کیے ہیں، یہ جگہ بچانے کے لیے شارٹ کر رہا ہوں)
-# آپ کو مین فنکشن میں وہی کنورسیشن ہینڈلرز رکھنے ہوں گے جو پچھلی فائل میں تھے
-
 async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # (Same as before)
     query = update.callback_query
     keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="main_menu")]]
     await query.message.edit_caption(caption="👑 **Owner Panel**", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -271,16 +272,14 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ⚙️ MAIN EXECUTION
 # ==========================================
 if __name__ == "__main__":
-    print("⏳ Waiting 2s...")
-    time.sleep(2)
+    # Conflict سے بچنے کے لیے 10 سیکنڈ کا وقفہ (Safe Side)
+    print("⏳ Waiting 10s to clear conflicts...")
+    time.sleep(10)
     print("🚀 Starting Bot...")
 
     request = HTTPXRequest(connection_pool_size=8, read_timeout=30.0, write_timeout=30.0)
     app = Application.builder().token(BOT_TOKEN).request(request).build()
     
-    # --- CONVERSATIONS ---
-    # (Paste the AU_CONV, AA_CONV, CL_CONV here from previous code if needed)
-    # For now, keeping Login only to show the Signal fix
     login_conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={LOGIN_USER: [MessageHandler(filters.TEXT, login_user_input)], LOGIN_PASS: [MessageHandler(filters.TEXT, login_pass_input)]},
@@ -292,8 +291,6 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(main_menu, pattern="^main_menu$"))
     app.add_handler(CallbackQueryHandler(get_pairs_handler, pattern="^get_pairs$"))
     app.add_handler(CallbackQueryHandler(pair_select_handler, pattern="^pair_")) 
-    
-    # LIVE SIGNAL
     app.add_handler(CallbackQueryHandler(generate_signal_handler, pattern="^time_"))
     app.add_handler(CallbackQueryHandler(stop_live_handler, pattern="^stop_live$"))
 
