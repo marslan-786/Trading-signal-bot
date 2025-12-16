@@ -11,7 +11,6 @@ from telegram.error import BadRequest, TimedOut, NetworkError
 import motor.motor_asyncio
 
 # ==========================================
-# ⚙️ CONFIGURATION
 # ==========================================
 DEFAULT_OWNER_ID = 8167904992
 BOT_TOKEN = "8487438477:AAH6IbeGJnPXEvhGpb4TSAdJmzC0fXaa0Og"
