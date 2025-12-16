@@ -11,6 +11,7 @@ from telegram.error import BadRequest, TimedOut, NetworkError
 import motor.motor_asyncio
 
 # ==========================================
+# ⚙️ CONFIGURATION
 # ==========================================
 DEFAULT_OWNER_ID = 8167904992
 BOT_TOKEN = "8487438477:AAH6IbeGJnPXEvhGpb4TSAdJmzC0fXaa0Og"
@@ -39,7 +40,7 @@ AA_ID, AA_PASS, AA_DAYS, AA_PERM = 6, 7, 8, 9
 CL_INPUT = 10
 
 # ==========================================
-# 🧠 STABLE TRADE BRAIN (200 Candles Based)
+# 🧠 TRADE BRAIN
 # ==========================================
 async def get_logic_settings():
     settings = await settings_collection.find_one({"type": "logic"})
@@ -49,15 +50,12 @@ async def get_logic_settings():
     return settings
 
 def calculate_signal(prices, config):
-    # ہمیں فیصلہ لینے کے لیے پوری 200 کینڈلز کا ڈیٹا چاہیے
-    if len(prices) < config['ema_long']: return "WAIT ⏳ (Gathering Data)"
+    if len(prices) < config['ema_long']: return "WAIT ⏳"
 
-    # --- 1. EMA CALCULATION (Trend) ---
-    # یہ پچھلی 200 کینڈلز کا نچوڑ ہے، یہ آسانی سے نہیں بدلے گا
+    # --- INDICATORS ---
     ema_short = sum(prices[-config['ema_short']:]) / config['ema_short']
     ema_long = sum(prices[-config['ema_long']:]) / config['ema_long']
     
-    # --- 2. RSI CALCULATION (Momentum) ---
     gains, losses = [], []
     for i in range(-config['rsi_period'], 0):
         change = prices[i] - prices[i-1]
@@ -67,34 +65,24 @@ def calculate_signal(prices, config):
     avg_loss = sum(losses) / len(losses) if losses else 0
     rsi = 100 - (100 / (1 + avg_gain / avg_loss)) if avg_loss != 0 else 50
     
-    # --- 3. MACD CALCULATION (Strength) ---
     short_ema = sum(prices[-config['macd_fast']:]) / config['macd_fast']
     long_ema = sum(prices[-config['macd_slow']:]) / config['macd_slow']
     macd = short_ema - long_ema
 
-    # --- 4. DECISION LOGIC (STABLE) ---
-    # ڈیفالٹ فیصلہ HOLD ہے
+    # --- DECISION ---
     signal = "HOLD 😐"
-
-    # CALL صرف تب جب ٹرینڈ واضح طور پر اوپر ہو (EMA 50 > EMA 200)
     if ema_short > ema_long:
-        # کیا RSI مناسب ہے؟ (نہ بہت مہنگا، نہ سستا)
-        if config['call_rsi_min'] < rsi < config['call_rsi_max']:
-             if macd > 0: # اور مومینٹم بھی ساتھ دے رہا ہو
-                 signal = "CALL 🟢"
-    
-    # PUT صرف تب جب ٹرینڈ واضح طور پر نیچے ہو (EMA 50 < EMA 200)
+        if config['call_rsi_min'] < rsi < config['call_rsi_max'] and macd > 0:
+            signal = "CALL 🟢"
     elif ema_short < ema_long:
-        if config['put_rsi_min'] < rsi < config['put_rsi_max']:
-            if macd < 0:
-                signal = "PUT 🔴"
+        if config['put_rsi_min'] < rsi < config['put_rsi_max'] and macd < 0:
+            signal = "PUT 🔴"
         
     return signal
 
 def get_progress_bar():
     now = datetime.now()
     seconds = now.second
-    # 60s Cycle
     total_blocks = 12
     filled_blocks = int((seconds / 60) * total_blocks)
     bar = "🟩" * filled_blocks + "▫️" * (total_blocks - filled_blocks)
@@ -119,7 +107,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🔒 **System Locked**\nEnter Login ID:", parse_mode="Markdown")
         return LOGIN_USER
     except:
-        await update.message.reply_text("⚠️ Bot is waking up... Retry /start")
+        await update.message.reply_text("⚠️ Bot waking up... Retry /start")
 
 async def login_user_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['temp_login'] = update.message.text
@@ -152,12 +140,17 @@ async def show_main_panel(update, context, role):
     try: await context.bot.send_photo(chat_id=chat_id, photo=BANNER_IMAGE_URL, caption=msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     except: await context.bot.send_message(chat_id=chat_id, text=msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
+# --- UPDATED PAIRS LIST ---
 async def get_pairs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    
+    # آپ کی دی گئی نئی لسٹ
     keyboard = [
         [InlineKeyboardButton("EUR/USD", callback_data="pair_EURUSD"), InlineKeyboardButton("GBP/USD", callback_data="pair_GBPUSD")],
-        [InlineKeyboardButton("USD/JPY", callback_data="pair_USDJPY"), InlineKeyboardButton("BTC/USD", callback_data="pair_BTCUSD")],
+        [InlineKeyboardButton("USD/JPY", callback_data="pair_USDJPY"), InlineKeyboardButton("AUD/USD", callback_data="pair_AUDUSD")],
+        [InlineKeyboardButton("BTC/USD", callback_data="pair_BTCUSD"), InlineKeyboardButton("ETH/USD", callback_data="pair_ETHUSD")],
+        [InlineKeyboardButton("XAU/USD", callback_data="pair_XAUUSD"), InlineKeyboardButton("USD/PKR", callback_data="pair_USDPKR")],
         [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
     ]
     try: await query.message.edit_caption(caption="📉 **Select Market Pair:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
@@ -177,7 +170,7 @@ async def pair_select_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
     except: await query.message.edit_text(text=f"📉 Pair: **{context.user_data['pair']}**\nSelect timeframe:", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 # ==========================================
-# ⚡️ FINAL CARD STYLE SIGNAL (STABLE)
+# ⚡️ FIXED SIGNAL LOGIC (LOCKS FOR 1 MIN)
 # ==========================================
 async def generate_signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -185,43 +178,51 @@ async def generate_signal_handler(update: Update, context: ContextTypes.DEFAULT_
     
     pair = context.user_data.get('pair', 'EURUSD')
     timeframe = query.data.split("_")[1]
-    stop_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 STOP", callback_data="stop_live")]])
     
-    try: msg = await query.message.edit_caption(caption="🔄 **Gathering 200 Candles History...**", parse_mode="Markdown")
-    except: msg = await query.message.edit_text(text="🔄 **Gathering 200 Candles History...**", parse_mode="Markdown")
+    # Back Button (Stop Logic)
+    back_keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back", callback_data="stop_live")]])
+    
+    try: msg = await query.message.edit_caption(caption="🔄 **Loading History & Strategy...**", parse_mode="Markdown")
+    except: msg = await query.message.edit_text(text="🔄 **Loading History & Strategy...**", parse_mode="Markdown")
 
     context.user_data['is_live'] = True
     
-    # --- 1. GENERATE STABLE HISTORY (پچھلا ڈیٹا) ---
-    # ہم لوپ سے باہر 199 کینڈلز فکس کر رہے ہیں
-    # یہ ہمارا "ماضی" ہے جو بدلے گا نہیں
-    trend_type = random.choice(["UP", "DOWN", "FLAT"])
+    # --- HISTORY GENERATION (199 Candles) ---
     base_price = 1.0500
-    history_prices = []
+    if pair == "BTCUSD": base_price = 90000.00
+    if pair == "XAUUSD": base_price = 2600.00
     
-    for i in range(199):
-        if trend_type == "UP": base_price += 0.0001
-        elif trend_type == "DOWN": base_price -= 0.0001
-        history_prices.append(base_price + random.uniform(-0.0002, 0.0002))
+    history_prices = []
+    # ایک ٹرینڈ سیٹ کریں تاکہ ہسٹری اصلی لگے
+    trend = random.choice([0.0001, -0.0001]) 
+    for _ in range(200):
+        base_price += trend + random.uniform(-0.00005, 0.00005)
+        history_prices.append(base_price)
 
-    # --- 2. LIVE LOOP ---
+    # --- SIGNAL LOCK VARIABLES ---
+    current_fixed_signal = None  # یہ وہ سگنل ہے جو فکس رہے گا
+    
     while context.user_data.get('is_live', False):
         try:
-            # صرف آخری (Current) کینڈل بدلے گی
-            live_fluctuation = random.uniform(-0.0005, 0.0005)
-            current_live_price = history_prices[-1] + live_fluctuation
-            
-            # 200 کینڈلز کا مکمل سیٹ (199 پرانی + 1 نئی)
-            # EMA 200 کا حساب ان سب پر ہوگا
-            full_data = history_prices + [current_live_price]
-            
-            # --- LOGIC ---
-            config = await get_logic_settings()
-            signal = calculate_signal(full_data, config)
-            
-            # --- PROGRESS BAR ---
             bar, seconds_left = get_progress_bar()
             
+            # --- LOCK LOGIC: صرف تب کیلکولیٹ کریں جب سگنل نہ ہو یا نیا منٹ شروع ہو ---
+            # ہم چیک کر رہے ہیں کہ کیا seconds_left زیادہ ہیں (یعنی منٹ شروع ہوا ہے)
+            # یا اگر یہ پہلی بار چل رہا ہے (None)
+            
+            if current_fixed_signal is None or seconds_left > 57:
+                # نیا منٹ شروع ہوا ہے -> نیا سگنل بنائیں
+                config = await get_logic_settings()
+                
+                # ہسٹری میں تھوڑی تبدیلی (نئی کینڈل کا ایفیکٹ)
+                latest_close = history_prices[-1] + random.uniform(-0.0002, 0.0002)
+                history_prices.append(latest_close)
+                if len(history_prices) > 200: history_prices.pop(0)
+                
+                # نیا فکسڈ سگنل کیلکولیٹ کریں
+                current_fixed_signal = calculate_signal(history_prices, config)
+
+            # --- DISPLAY (Signal wahi rahega, sirf Time update hoga) ---
             res_text = (
                 f"📊 **MARKET ANALYSIS**\n"
                 f"🆔 Pair: `{pair}`\n"
@@ -230,20 +231,15 @@ async def generate_signal_handler(update: Update, context: ContextTypes.DEFAULT_
                 f"> 🔥 **FINAL DECISION**\n"
                 f"> ━━━━━━━━━━━━━\n"
                 f"> \n"
-                f">      # {signal}      \n"
+                f">      # {current_fixed_signal}      \n"
                 f"> \n"
                 f"> ━━━━━━━━━━━━━\n\n"
-                f"⏳ **Closing in:** {seconds_left}s\n"
+                f"⏳ **Next Candle:** {seconds_left}s\n"
                 f"{bar}"
             )
             
-            await msg.edit_caption(caption=res_text, reply_markup=stop_keyboard, parse_mode="Markdown")
-            await asyncio.sleep(3)
-            
-            # اگر منٹ پورا ہو جائے تو ہسٹری میں یہ کینڈل پکی کر دیں
-            if seconds_left <= 3:
-                history_prices.append(current_live_price)
-                if len(history_prices) > 200: history_prices.pop(0)
+            await msg.edit_caption(caption=res_text, reply_markup=back_keyboard, parse_mode="Markdown")
+            await asyncio.sleep(3) # 3 سیکنڈ کا وقفہ
 
         except BadRequest:
             await asyncio.sleep(3)
@@ -252,9 +248,10 @@ async def generate_signal_handler(update: Update, context: ContextTypes.DEFAULT_
 
 async def stop_live_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer("🛑 Stopped!")
+    await query.answer()
     context.user_data['is_live'] = False
-    await get_pairs_handler(update, context)
+    # واپس ٹائم فریم والے مینیو پر جائیں
+    await pair_select_handler(update, context)
 
 # ==========================================
 # 👑 OWNER & ADMIN (Short)
@@ -271,9 +268,8 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ⚙️ MAIN EXECUTION
 # ==========================================
 if __name__ == "__main__":
-    # Conflict سے بچنے کے لیے 10 سیکنڈ کا وقفہ (Safe Side)
-    print("⏳ Waiting 10s to clear conflicts...")
-    time.sleep(10)
+    print("⏳ Waiting 5s...")
+    time.sleep(5)
     print("🚀 Starting Bot...")
 
     request = HTTPXRequest(connection_pool_size=8, read_timeout=30.0, write_timeout=30.0)
@@ -290,7 +286,9 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(main_menu, pattern="^main_menu$"))
     app.add_handler(CallbackQueryHandler(get_pairs_handler, pattern="^get_pairs$"))
     app.add_handler(CallbackQueryHandler(pair_select_handler, pattern="^pair_")) 
+    
     app.add_handler(CallbackQueryHandler(generate_signal_handler, pattern="^time_"))
+    # Stop/Back Handler
     app.add_handler(CallbackQueryHandler(stop_live_handler, pattern="^stop_live$"))
 
     print("✅ Bot Started! Send /start")
