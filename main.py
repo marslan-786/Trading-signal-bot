@@ -1,30 +1,24 @@
 import asyncio
+import time
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from telegram.request import HTTPXRequest  # نیٹ ورک ٹائم آؤٹ فکس کرنے کے لیے
 import motor.motor_asyncio
-from datetime import datetime, timedelta
-import pytz
 
 # ==========================================
-# ⚙️ CONFIGURATION & DATABASE
+# ⚙️ CONFIGURATION
 # ==========================================
-
-# اپنی اصلی آئی ڈی اور ٹوکن یہاں لکھیں
 DEFAULT_OWNER_ID = 8167904992
 BOT_TOKEN = "8487438477:AAH6IbeGJnPXEvhGpb4TSAdJmzC0fXaa0Og"
 MONGO_URL = "mongodb://mongo:AEvrikOWlrmJCQrDTQgfGtqLlwhwLuAA@crossover.proxy.rlwy.net:29609"
-
-# امیج کا لنک (فائل اپلوڈ کا جھنجھٹ ختم)
-# آپ اسے اپنی مرضی کے لنک سے بدل سکتے ہیں (imgur یا telegram link)
 BANNER_IMAGE_URL = "https://i.imgur.com/8QS1M4A.png" 
 
+# ڈیٹا بیس کنکشن
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
 db = client['trading_bot_db']
 users_collection = db['users']
 
-# ==========================================
-# 🚦 STATES FOR CONVERSATION
-# ==========================================
+# States
 LOGIN_USER, LOGIN_PASS = 0, 1
 ADD_OWNER_TG_ID = 2
 
@@ -35,7 +29,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     tg_id = user.id
     
-    # Check Default Owner
+    # 1. Default Owner Check
     if tg_id == DEFAULT_OWNER_ID:
         await users_collection.update_one(
             {"telegram_id": tg_id},
@@ -45,15 +39,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_main_panel(update, context, "DEFAULT_OWNER")
         return ConversationHandler.END
 
-    # Check Database
+    # 2. Database Check
     user_doc = await users_collection.find_one({"telegram_id": tg_id})
     if user_doc:
         role = user_doc.get("role", "USER")
         await show_main_panel(update, context, role)
         return ConversationHandler.END
         
-    # Login Required
-    await update.message.reply_text("🔒 System Locked\n\nPlease enter your Login ID to access:")
+    # 3. Login Required
+    await update.message.reply_text("🔒 System Locked\n\nPlease enter your Login ID:")
     return LOGIN_USER
 
 # ==========================================
@@ -74,23 +68,22 @@ async def login_pass_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user:
         if user.get("telegram_id") is None:
             await users_collection.update_one({"_id": user["_id"]}, {"$set": {"telegram_id": tg_id}})
-            await update.message.reply_text("✅ Device Registered Successfully!")
+            await update.message.reply_text("✅ Device Registered!")
             await show_main_panel(update, context, user['role'])
         elif user.get("telegram_id") == tg_id:
             await show_main_panel(update, context, user['role'])
         else:
-            await update.message.reply_text("⛔ Account already used on another Telegram!")
+            await update.message.reply_text("⛔ Already active on another Telegram!")
     else:
-        await update.message.reply_text("❌ Invalid ID or Password.")
+        await update.message.reply_text("❌ Invalid ID/Password.")
     
     return ConversationHandler.END
 
 # ==========================================
-# 🖥️ PANELS & MENUS
+# 🖥️ MAIN PANEL (Image Handling Improved)
 # ==========================================
 async def show_main_panel(update, context, role):
     keyboard = [[InlineKeyboardButton("📊 Get Pairs", callback_data="get_pairs")]]
-    
     msg = f"👋 Welcome! Your Role: {role}\nSelect an option below:"
 
     if role in ["DEFAULT_OWNER", "OWNER"]:
@@ -100,50 +93,59 @@ async def show_main_panel(update, context, role):
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    # تصویر بھیجنے کا محفوظ طریقہ
-    chat_id = update.effective_chat.id
-    
-    # پرانا میسج ڈیلیٹ کریں تاکہ نیا صاف ستھرا آئے
+    # کوشش کریں کہ میسج ایڈٹ ہو، اگر نہ ہو سکے تو نیا بھیجیں
     if update.callback_query:
         try:
-            await update.callback_query.message.delete()
+            # اگر پہلے سے فوٹو ہے تو صرف کیپشن بدلیں (Fastest)
+            await update.callback_query.message.edit_caption(caption=msg, reply_markup=reply_markup)
+            return
         except:
-            pass
+            # اگر ایڈٹ نہ ہو سکے (جیسے پرانا میسج فوٹو نہیں تھا) تو ڈیلیٹ کر دیں
+            await update.callback_query.message.delete()
 
+    # نیا فوٹو بھیجیں
     await context.bot.send_photo(
-        chat_id=chat_id, 
+        chat_id=update.effective_chat.id, 
         photo=BANNER_IMAGE_URL, 
         caption=msg, 
         reply_markup=reply_markup
     )
 
 # ==========================================
-# 📊 GET PAIRS HANDLER (یہ مسنگ تھا)
+# 📊 GET PAIRS (UPDATED LIST)
 # ==========================================
 async def get_pairs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer() # لوڈنگ ختم کرنے کے لیے
+    await query.answer()
     
+    # آپ کی دی ہوئی لسٹ کے مطابق بٹن
     keyboard = [
         [InlineKeyboardButton("EUR/USD", callback_data="pair_EURUSD"), InlineKeyboardButton("GBP/USD", callback_data="pair_GBPUSD")],
-        [InlineKeyboardButton("USD/JPY", callback_data="pair_USDJPY"), InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
+        [InlineKeyboardButton("USD/JPY", callback_data="pair_USDJPY"), InlineKeyboardButton("AUD/USD", callback_data="pair_AUDUSD")],
+        [InlineKeyboardButton("BTC/USD", callback_data="pair_BTCUSD"), InlineKeyboardButton("ETH/USD", callback_data="pair_ETHUSD")],
+        [InlineKeyboardButton("XAU/USD", callback_data="pair_XAUUSD"), InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
     ]
     
-    # تصویر کے ساتھ ایڈٹ کریں
+    # تصویر کو دوبارہ لوڈ کرنے کی بجائے صرف کیپشن ایڈٹ کریں (یہ TimedOut سے بچائے گا)
     try:
-        await query.message.edit_caption(caption="📉 Select a Currency Pair to Analyze:", reply_markup=InlineKeyboardMarkup(keyboard))
-    except:
-        # اگر فوٹو ایکسپائر ہو جائے تو نیا میسج
+        await query.message.edit_caption(
+            caption="📉 **Select a Market Pair:**", 
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        # اگر کوئی مسئلہ ہو تو پرانا ڈیلیٹ کر کے نیا بھیجیں
         await query.message.delete()
         await context.bot.send_photo(
             chat_id=query.message.chat_id,
             photo=BANNER_IMAGE_URL,
-            caption="📉 Select a Currency Pair:",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            caption="📉 **Select a Market Pair:**",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
         )
 
 # ==========================================
-# 👑 OWNER PANEL HANDLING
+# 👑 OWNER & BACK HANDLERS
 # ==========================================
 async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -164,7 +166,6 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📋 User List", callback_data="list_users")],
         [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
     ]
-    
     if role == "DEFAULT_OWNER":
         keyboard.insert(0, [InlineKeyboardButton("➕ Add NEW OWNER", callback_data="add_owner_start")])
 
@@ -187,39 +188,38 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # --- ADD OWNER ---
 async def add_owner_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.message.reply_text("👤 Send the Telegram ID of the new Owner:")
+    await update.callback_query.message.reply_text("👤 Send Telegram ID of new Owner:")
     return ADD_OWNER_TG_ID
 
 async def add_owner_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        new_owner_id = int(update.message.text)
-        await users_collection.insert_one({
-            "telegram_id": new_owner_id,
-            "role": "OWNER",
-            "created_by": "DEFAULT_OWNER",
-            "is_blocked": False
-        })
-        await update.message.reply_text(f"✅ Owner Added (ID: {new_owner_id}) successfully!")
-    except ValueError:
-        await update.message.reply_text("❌ Please send a valid numeric ID.")
+        new_id = int(update.message.text)
+        await users_collection.insert_one({"telegram_id": new_id, "role": "OWNER", "created_by": "DEFAULT_OWNER", "is_blocked": False})
+        await update.message.reply_text(f"✅ Owner Added: {new_id}")
+    except:
+        await update.message.reply_text("❌ Invalid ID")
     return ConversationHandler.END
 
 # ==========================================
-# ⚙️ MAIN EXECUTION
+# ⚙️ MAIN EXECUTION (Fixed Timeouts)
 # ==========================================
 if __name__ == "__main__":
-    app = Application.builder().token(BOT_TOKEN).build()
+    # 1. Conflict سے بچنے کے لیے 15 سیکنڈ کا وقفہ
+    print("⏳ Waiting 15s for old container to stop...")
+    time.sleep(15)
+    print("🚀 Starting Bot...")
+
+    # 2. Network Timeouts بڑھائیں (تاکہ TimedOut ایرر نہ آئے)
+    request = HTTPXRequest(connection_pool_size=8, read_timeout=30.0, write_timeout=30.0)
+    
+    app = Application.builder().token(BOT_TOKEN).request(request).build()
     
     # Handlers
     login_conv = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
-        states={
-            LOGIN_USER: [MessageHandler(filters.TEXT, login_user_input)],
-            LOGIN_PASS: [MessageHandler(filters.TEXT, login_pass_input)],
-        },
+        states={LOGIN_USER: [MessageHandler(filters.TEXT, login_user_input)], LOGIN_PASS: [MessageHandler(filters.TEXT, login_pass_input)]},
         fallbacks=[]
     )
-    
     add_owner_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(add_owner_start, pattern="^add_owner_start$")],
         states={ADD_OWNER_TG_ID: [MessageHandler(filters.TEXT, add_owner_save)]},
@@ -228,15 +228,9 @@ if __name__ == "__main__":
 
     app.add_handler(login_conv)
     app.add_handler(add_owner_conv)
-    
-    # Callback Handlers
     app.add_handler(CallbackQueryHandler(owner_panel, pattern="^panel_owner$"))
     app.add_handler(CallbackQueryHandler(main_menu, pattern="^main_menu$"))
-    
-    # --- HERE IS THE FIX FOR "GET PAIRS" ---
     app.add_handler(CallbackQueryHandler(get_pairs_handler, pattern="^get_pairs$")) 
 
-    print("Bot is Running on Railway...")
-    
-    # drop_pending_updates=True پرانے لٹکے ہوئے میسجز کو صاف کر دے گا
-    app.run_polling(drop_pending_updates=True)
+    print("✅ Bot Polling Started...")
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
