@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from telegram.request import HTTPXRequest
+from telegram.error import BadRequest, TimedOut, NetworkError
 import motor.motor_asyncio
 
 # ==========================================
@@ -14,7 +15,7 @@ import motor.motor_asyncio
 DEFAULT_OWNER_ID = 8167904992
 BOT_TOKEN = "8487438477:AAH6IbeGJnPXEvhGpb4TSAdJmzC0fXaa0Og"
 MONGO_URL = "mongodb://mongo:AEvrikOWlrmJCQrDTQgfGtqLlwhwLuAA@crossover.proxy.rlwy.net:29609"
-BANNER_IMAGE_URL = "[https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcQQZxNYQibx7vN--rZ9LVHiDbIYok3dWw4oz1-pNnPCLg&s=10](https://i.imgur.com/8QS1M4A.png)" 
+BANNER_IMAGE_URL = "https://i.imgur.com/8QS1M4A.png" 
 
 # --- DEFAULT LOGIC ---
 DEFAULT_LOGIC_CONFIG = {
@@ -97,23 +98,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     tg_id = user.id
     
-    if tg_id == DEFAULT_OWNER_ID:
-        await users_collection.update_one(
-            {"telegram_id": tg_id},
-            {"$set": {"role": "DEFAULT_OWNER", "login_id": "BOSS", "is_blocked": False}},
-            upsert=True
-        )
-        await get_logic_settings()
-        await show_main_panel(update, context, "DEFAULT_OWNER")
-        return ConversationHandler.END
+    try:
+        # 1. Default Owner Setup
+        if tg_id == DEFAULT_OWNER_ID:
+            await users_collection.update_one(
+                {"telegram_id": tg_id},
+                {"$set": {"role": "DEFAULT_OWNER", "login_id": "BOSS", "is_blocked": False}},
+                upsert=True
+            )
+            # Ensure Logic exists
+            await get_logic_settings()
+            await show_main_panel(update, context, "DEFAULT_OWNER")
+            return ConversationHandler.END
 
-    user_doc = await users_collection.find_one({"telegram_id": tg_id})
-    if user_doc:
-        await show_main_panel(update, context, user_doc['role'])
-        return ConversationHandler.END
+        # 2. Check DB
+        user_doc = await users_collection.find_one({"telegram_id": tg_id})
+        if user_doc:
+            await show_main_panel(update, context, user_doc['role'])
+            return ConversationHandler.END
+            
+        await update.message.reply_text("🔒 **System Locked**\nEnter Login ID:", parse_mode="Markdown")
+        return LOGIN_USER
         
-    await update.message.reply_text("🔒 **System Locked**\nEnter Login ID:", parse_mode="Markdown")
-    return LOGIN_USER
+    except Exception as e:
+        print(f"Error in start: {e}")
+        await update.message.reply_text("⚠️ Bot is restarting, please try /start again in 5 seconds.")
 
 async def login_user_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['temp_login'] = update.message.text
@@ -138,7 +147,7 @@ async def login_pass_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ==========================================
-# 🖥️ PANELS & NAVIGATION
+# 🖥️ PANELS & NAVIGATION (FAILSAFE ADDED)
 # ==========================================
 async def show_main_panel(update, context, role):
     keyboard = [[InlineKeyboardButton("📊 Get Pairs", callback_data="get_pairs")]]
@@ -150,11 +159,30 @@ async def show_main_panel(update, context, role):
     msg = f"👋 **Welcome Boss!**\nRole: `{role}`"
     reply_markup = InlineKeyboardMarkup(keyboard)
 
+    chat_id = update.effective_chat.id
+
+    # 1. Try to delete old message (Cleaner UI)
     if update.callback_query:
         try: await update.callback_query.message.delete()
         except: pass
     
-    await context.bot.send_photo(chat_id=update.effective_chat.id, photo=BANNER_IMAGE_URL, caption=msg, reply_markup=reply_markup, parse_mode="Markdown")
+    # 2. Try Sending Photo
+    try:
+        await context.bot.send_photo(
+            chat_id=chat_id, 
+            photo=BANNER_IMAGE_URL, 
+            caption=msg, 
+            reply_markup=reply_markup, 
+            parse_mode="Markdown"
+        )
+    except (TimedOut, NetworkError, BadRequest):
+        # 3. Fallback to TEXT if Photo fails (Bot won't hang)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"{msg}\n\n(Image failed to load)",
+            reply_markup=reply_markup,
+            parse_mode="Markdown"
+        )
 
 # --- 1. GET PAIRS ---
 async def get_pairs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -165,7 +193,12 @@ async def get_pairs_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("USD/JPY", callback_data="pair_USDJPY"), InlineKeyboardButton("BTC/USD", callback_data="pair_BTCUSD")],
         [InlineKeyboardButton("🔙 Back", callback_data="main_menu")]
     ]
-    await query.message.edit_caption(caption="📉 **Select Market Pair:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    # Use edit_message_caption safely
+    try:
+        await query.message.edit_caption(caption="📉 **Select Market Pair:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    except:
+        await query.message.delete()
+        await context.bot.send_message(chat_id=query.message.chat_id, text="📉 **Select Market Pair:**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 # --- 2. SELECT TIMEFRAME ---
 async def pair_select_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -180,11 +213,19 @@ async def pair_select_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
         [InlineKeyboardButton("15 Min", callback_data="time_15m"), InlineKeyboardButton("30 Min", callback_data="time_30m")],
         [InlineKeyboardButton("🔙 Back", callback_data="get_pairs")]
     ]
-    await query.message.edit_caption(
-        caption=f"📉 Pair: **{selected_pair}**\nNow select timeframe:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
+    
+    try:
+        await query.message.edit_caption(
+            caption=f"📉 Pair: **{selected_pair}**\nNow select timeframe:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+    except:
+        await query.message.edit_text(
+            text=f"📉 Pair: **{selected_pair}**\nNow select timeframe:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
 
 # --- 3. GENERATE SIGNAL ---
 async def generate_signal_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -193,8 +234,6 @@ async def generate_signal_handler(update: Update, context: ContextTypes.DEFAULT_
     
     pair = context.user_data.get('pair', 'Unknown')
     timeframe = query.data.split("_")[1]
-    
-    await query.message.edit_caption(caption="🔄 **Analyzing Market...**")
     
     # Fake Data for Demo (Quotex Logic integration point)
     base = 1.0500
@@ -219,7 +258,12 @@ async def generate_signal_handler(update: Update, context: ContextTypes.DEFAULT_
     )
     
     keyboard = [[InlineKeyboardButton("🔙 Pairs", callback_data="get_pairs")]]
-    await query.message.edit_caption(caption=res_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    
+    try:
+        await query.message.edit_caption(caption=res_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    except:
+        await query.message.delete()
+        await context.bot.send_message(chat_id=query.message.chat_id, text=res_text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 # ==========================================
 # 👑 OWNER PANEL & ADD USER/ADMIN LOGIC
@@ -234,7 +278,10 @@ async def owner_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id == DEFAULT_OWNER_ID:
         keyboard.insert(0, [InlineKeyboardButton("➕ Add NEW OWNER", callback_data="add_owner_start")])
     
-    await query.message.edit_caption(caption="👑 **Owner Panel**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    try:
+        await query.message.edit_caption(caption="👑 **Owner Panel**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    except:
+        await query.message.edit_text(caption="👑 **Owner Panel**", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 # --- ADD USER ---
 async def au_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -322,20 +369,17 @@ async def aa_final(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.message.edit_text(msg, parse_mode="Markdown")
     return ConversationHandler.END
 
-# --- CHANGE LOGIC (Syntax Error Fixed Here) ---
+# --- CHANGE LOGIC ---
 async def cl_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     curr = await get_logic_settings()
     curr.pop('_id', None)
-    
     json_text = json.dumps(curr, indent=2)
     
-    # I separated the string to avoid the syntax error
     msg = (
         f"⚙️ **Current Logic Settings:**\n"
         f"```json\n{json_text}\n```\n"
         f"To change, **Copy the JSON above**, edit values, and Send it back."
     )
-    
     await update.callback_query.message.reply_text(msg, parse_mode="Markdown")
     return CL_INPUT
 
@@ -366,8 +410,9 @@ async def add_owner_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ⚙️ MAIN EXECUTION
 # ==========================================
 if __name__ == "__main__":
-    print("⏳ Waiting 15s for old container to stop...")
-    time.sleep(15)
+    # Sleep Reduced to 2 seconds
+    print("⏳ Waiting 2s for safety...")
+    time.sleep(2)
     print("🚀 Starting Bot...")
 
     request = HTTPXRequest(connection_pool_size=8, read_timeout=30.0, write_timeout=30.0)
@@ -411,5 +456,5 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(pair_select_handler, pattern="^pair_")) 
     app.add_handler(CallbackQueryHandler(generate_signal_handler, pattern="^time_")) 
 
-    print("✅ Bot Polling Started...")
+    print("✅ Bot Polling Started... SEND /start NOW")
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
